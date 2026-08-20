@@ -884,13 +884,18 @@ class AssistantRuntime:
                     published_manifest_hash=expected.digest,
                     git_commit=git_commit,
                 )
-                self.store.append_event(
-                    run_id,
-                    node="publisher",
-                    event_type="publication.published",
-                    summary="Reviewed changes committed on an isolated Git branch and re-verified",
-                    artifact_id=artifact.artifact_id,
-                )
+                try:
+                    self.store.append_event(
+                        run_id,
+                        node="publisher",
+                        event_type="publication.published",
+                        summary="Reviewed changes committed on an isolated Git branch and re-verified",
+                        artifact_id=artifact.artifact_id,
+                    )
+                except Exception:
+                    # Publication is already durably complete.  A secondary
+                    # timeline write must never undo the verified Git commit.
+                    pass
                 return completed
             except Exception as exc:
                 rollback_ok = self._rollback_publication(

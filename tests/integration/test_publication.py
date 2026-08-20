@@ -331,6 +331,35 @@ def test_publication_api_exposes_preview_and_requires_bound_confirmation(
     ).read_text(encoding="utf-8")
 
 
+def test_completed_git_publication_is_not_undone_when_timeline_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, source = _runtime(tmp_path)
+    completed = _completed(runtime)
+    preview = runtime.publication_preview(completed.run_id)
+    original_append = runtime.store.append_event
+
+    def append_event(*args, **kwargs):
+        if kwargs.get("event_type") == "publication.published":
+            raise RuntimeError("timeline unavailable")
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.store, "append_event", append_event)
+    published = runtime.publish_run(
+        completed.run_id,
+        confirmation="publish",
+        project_profile_hash=preview.project_profile_hash,
+        source_manifest_hash=preview.source_manifest_hash,
+        diff_sha256=preview.diff_sha256,
+        **_publish_binding(preview),
+        idempotency_key="publication-event-failure-001",
+    )
+
+    assert published.status == "published"
+    assert published.git_commit == _git(source, "rev-parse", "HEAD")
+    assert _git(source, "branch", "--show-current") == preview.git_target_branch
+
+
 def test_interrupted_publication_is_rolled_back_on_runtime_restart(
     tmp_path: Path,
 ) -> None:
