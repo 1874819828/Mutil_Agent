@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Agent 软件开发助手 · 控制台</title>
+  <script>
+    // 提前应用主题偏好, 避免加载闪烁
+    try {
+      document.documentElement.dataset.theme =
+        localStorage.getItem("mvd.theme") || "dark";
+    } catch (e) { /* 无存储权限时保持默认深色 */ }
+  </script>
+  <link rel="stylesheet" href="/console/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">◆</span>
+      <div>
+        <h1>Multi-Agent 软件开发助手</h1>
+        <p class="subtitle">Manager → 人工审批 → Developer → Tester(Docker)→ Policy Gate → Reviewer</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <button id="themeToggleBtn" class="ghost" title="切换浅色/深色主题">☀️ 浅色</button>
+      <span id="providerBadge" class="badge hidden"></span>
+      <button id="logoutBtn" class="ghost hidden">退出登录</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- 登录视图 -->
+    <section id="loginView" class="view hidden">
+      <div class="card login-card">
+        <h2>连接本机控制服务</h2>
+        <p class="muted">请输入控制令牌(位于 <code>agent-assistant/runtime/control-token</code>),仅本机回环地址可访问。</p>
+        <input type="password" id="tokenInput" placeholder="control token" autocomplete="off" spellcheck="false">
+        <button id="loginBtn" class="primary">连接</button>
+        <p id="loginError" class="error hidden"></p>
+      </div>
+    </section>
+
+    <!-- 任务列表 -->
+    <section id="listView" class="view hidden">
+      <div class="toolbar">
+        <h2>运行任务</h2>
+        <div class="toolbar-actions">
+          <button id="refreshBtn" class="ghost">刷新</button>
+          <button id="newRunBtn" class="primary">+ 新建任务</button>
+        </div>
+      </div>
+      <div id="runTableWrap" class="card"></div>
+    </section>
+
+    <!-- 创建任务 -->
+    <section id="createView" class="view hidden">
+      <div class="toolbar">
+        <h2>新建开发任务</h2>
+        <button id="createBackBtn" class="ghost">← 返回列表</button>
+      </div>
+      <div class="card form-card">
+        <label for="createProject">目标项目</label>
+        <select id="createProject"></select>
+
+        <label for="createPack">验收任务(Acceptance Pack)<span class="req">*</span></label>
+        <select id="createPack"></select>
+        <p id="packHint" class="hint"></p>
+
+        <label for="createRequirement">需求描述<span class="req">*</span></label>
+        <textarea id="createRequirement" rows="4" placeholder="例如: 为班级列表接口增加可选的 grade 精确过滤参数；不传参数时保持现有行为，非法参数仍由接口校验返回 422。"></textarea>
+
+        <div class="form-actions">
+          <button id="createRunBtn" class="primary">创建并进入队列</button>
+          <p id="createError" class="error hidden"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 运行详情 -->
+    <section id="detailView" class="view hidden"></section>
+  </main>
+
+  <script src="/console/app.js"></script>
+</body>
+</html>

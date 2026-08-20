@@ -1,0 +1,14 @@
+pack_id: class-update-count-v1
+project_id: student-management-backend
+version: 1
+status: ready
+task_spec: >-
+  修复班级更新接口，使响应中的 student_count 始终等于数据库中该班级的真实学生数量，同时保持现有更新与错误响应契约。
+test_dir: class-update-count-v1
+runner:
+  image: ai-agent/python-fastapi-runner:2026-08-11
+  digest: sha256:c68abd59632adf81b95ccc7430c6d1e74513fd427bd17d9a10e7626db2277001
+  command: [python, -m, pytest, -q, -p, no:cacheprovider, /acceptance_tests]
+dependencies:
+  - httpx==0.28.1
+harness_files: []
