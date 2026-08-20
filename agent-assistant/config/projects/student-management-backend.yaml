@@ -1,0 +1,24 @@
+project_id: student-management-backend
+source_path: ../../../student-management
+include_globs:
+  - backend/app/**/*.py
+  - backend/requirements.txt
+  - tests/**/*.py
+exclude_globs:
+  - backend/student.db
+  - "**/__pycache__/**"
+runner: python-fastapi
+commands:
+  syntax: [python, -m, compileall, backend/app]
+  baseline_test: [python, -m, pytest, -q, -p, no:cacheprovider, /baseline_tests]
+  acceptance_test: [python, -m, pytest, -q, -p, no:cacheprovider, /acceptance_tests]
+  developer_test: [python, -m, pytest, -q, -p, no:cacheprovider, /workspace/tests]
+runner_image: ai-agent/python-fastapi-runner:2026-08-11
+runner_digest: sha256:c68abd59632adf81b95ccc7430c6d1e74513fd427bd17d9a10e7626db2277001
+limits:
+  timeout_seconds: 120
+  memory_mb: 1024
+  cpus: 1.0
+  max_files: 2000
+  max_file_mb: 2
+  max_workspace_mb: 100

@@ -1,0 +1,14 @@
+pack_id: class-grade-filter-v1
+project_id: student-management-backend
+version: 1
+status: ready
+task_spec: >-
+  为班级列表接口增加可选的 grade 精确过滤参数；不传参数时保持现有行为，非法参数仍由接口校验返回 422。
+test_dir: class-grade-filter-v1
+runner:
+  image: ai-agent/python-fastapi-runner:2026-08-11
+  digest: sha256:c68abd59632adf81b95ccc7430c6d1e74513fd427bd17d9a10e7626db2277001
+  command: [python, -m, pytest, -q, -p, no:cacheprovider, /acceptance_tests]
+dependencies:
+  - httpx==0.28.1
+harness_files: []

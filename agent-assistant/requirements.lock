@@ -1,0 +1,14 @@
+fastapi==0.125.0
+httpx==0.28.1
+aiosqlite==0.22.1
+coverage==7.15.4
+langgraph==1.0.5
+langgraph-checkpoint==3.0.1
+langgraph-checkpoint-sqlite==3.0.3
+pydantic==2.11.7
+openai==2.18.0
+python-dotenv==1.1.1
+pytest==7.4.4
+PyYAML==6.0.1
+sqlite-vec==0.1.9
+uvicorn==0.38.0
