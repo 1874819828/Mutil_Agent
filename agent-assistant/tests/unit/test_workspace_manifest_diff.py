@@ -20,6 +20,7 @@ def _profile(source: Path):
             {
                 "project_id": "demo",
                 "source_path": source,
+                "repository_path": source,
                 "include_globs": ["src/**/*.py"],
                 "exclude_globs": [],
                 "runner": "python-fastapi",

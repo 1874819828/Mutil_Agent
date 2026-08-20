@@ -112,6 +112,11 @@ class PublicationPreview:
     diff_sha256: str
     changed_files: tuple[str, ...]
     git_ready: bool
+    git_repository_root: str
+    git_project_subpath: str
+    git_remote_name: str
+    git_remote_url: str | None
+    git_base_branch: str
     git_current_branch: str | None
     git_base_commit: str | None
     git_target_branch: str | None
@@ -592,6 +597,11 @@ class AssistantRuntime:
         current_hash: str | None = None
         reason: str | None = None
         git_ready = False
+        git_repository_root = str(profile.repository_path)
+        git_project_subpath = profile.project_subpath
+        git_remote_name = profile.remote_name
+        git_remote_url: str | None = None
+        git_base_branch = profile.base_branch
         git_current_branch = (
             existing.git_original_branch if existing is not None else None
         )
@@ -621,6 +631,24 @@ class AssistantRuntime:
                     profile.limits,
                 )
                 current_hash = current.digest
+                git_state = self._git_delivery.inspect(
+                    profile.source_path,
+                    repository_root=profile.repository_path,
+                    run_id=run_id,
+                    base_branch=profile.base_branch,
+                    remote_name=profile.remote_name,
+                    branch_prefix=profile.branch_prefix,
+                )
+                git_ready = git_state.ready
+                git_repository_root = str(git_state.repository_root)
+                git_project_subpath = git_state.project_subpath
+                git_remote_name = git_state.remote_name or profile.remote_name
+                git_remote_url = git_state.remote_url
+                git_base_branch = git_state.base_branch or profile.base_branch
+                if existing is None:
+                    git_current_branch = git_state.current_branch
+                    git_base_commit = git_state.head_commit
+                    git_target_branch = git_state.target_branch
                 if existing is not None and existing.status in {
                     "publishing",
                     "published",
@@ -633,16 +661,8 @@ class AssistantRuntime:
                     reason = "file deletion publication is not supported"
                 elif current_hash != source_hash:
                     reason = "project source changed after this run was created"
-                else:
-                    git_state = self._git_delivery.inspect(
-                        profile.source_path, run_id=run_id
-                    )
-                    git_ready = git_state.ready
-                    git_current_branch = git_state.current_branch
-                    git_base_commit = git_state.head_commit
-                    git_target_branch = git_state.target_branch
-                    if not git_state.ready:
-                        reason = git_state.reason or "Git repository is not ready"
+                elif not git_state.ready:
+                    reason = git_state.reason or "Git repository is not ready"
             except Exception:
                 reason = "project source or completed workspace cannot be safely verified"
 
@@ -659,6 +679,11 @@ class AssistantRuntime:
             diff_sha256=diff_sha256,
             changed_files=changed_files,
             git_ready=git_ready,
+            git_repository_root=git_repository_root,
+            git_project_subpath=git_project_subpath,
+            git_remote_name=git_remote_name,
+            git_remote_url=git_remote_url,
+            git_base_branch=git_base_branch,
             git_current_branch=git_current_branch,
             git_base_commit=git_base_commit,
             git_target_branch=git_target_branch,
@@ -676,6 +701,8 @@ class AssistantRuntime:
         git_original_branch: str,
         git_base_commit: str,
         git_target_branch: str,
+        git_remote_name: str,
+        git_remote_url: str,
         idempotency_key: str,
         comment: str | None = None,
     ) -> PublicationRecord:
@@ -698,6 +725,8 @@ class AssistantRuntime:
                 "git_original_branch": git_original_branch,
                 "git_base_commit": git_base_commit,
                 "git_target_branch": git_target_branch,
+                "git_remote_name": git_remote_name,
+                "git_remote_url": git_remote_url,
                 "comment": comment.strip() if comment else None,
             }
         )
@@ -727,6 +756,8 @@ class AssistantRuntime:
                 ("Git original branch", preview.git_current_branch, git_original_branch),
                 ("Git base commit", preview.git_base_commit, git_base_commit),
                 ("Git target branch", preview.git_target_branch, git_target_branch),
+                ("Git remote name", preview.git_remote_name, git_remote_name),
+                ("Git remote URL", preview.git_remote_url, git_remote_url),
             ):
                 if not expected or supplied != expected:
                     raise PublicationValidationError(
@@ -780,10 +811,15 @@ class AssistantRuntime:
             try:
                 git_session = self._git_delivery.start(
                     profile.source_path,
+                    repository_root=profile.repository_path,
                     run_id=run_id,
+                    base_branch=profile.base_branch,
+                    remote_name=profile.remote_name,
+                    branch_prefix=profile.branch_prefix,
                     expected_original_branch=git_original_branch,
                     expected_base_commit=git_base_commit,
                     expected_target_branch=git_target_branch,
+                    expected_remote_url=git_remote_url,
                 )
                 for relative_path in diff.changed_files:
                     target = validate_write_path(
@@ -845,6 +881,10 @@ class AssistantRuntime:
                 git_commit = self._git_delivery.commit(
                     git_session,
                     changed_files=diff.changed_files,
+                    expected_content_sha256={
+                        path: hashlib.sha256(desired[path]).hexdigest()
+                        for path in diff.changed_files
+                    },
                     message=f"agent: publish run {run_id}",
                 )
 
@@ -858,6 +898,11 @@ class AssistantRuntime:
                     "published_manifest_hash": expected.digest,
                     "changed_files": list(diff.changed_files),
                     "git": {
+                        "repository_root": str(profile.repository_path),
+                        "project_subpath": profile.project_subpath,
+                        "remote_name": git_remote_name,
+                        "remote_url": git_remote_url,
+                        "base_branch": profile.base_branch,
                         "original_branch": git_original_branch,
                         "base_commit": git_base_commit,
                         "branch": git_target_branch,
@@ -1410,7 +1455,9 @@ class AssistantRuntime:
                 ):
                     self._git_delivery.abort(
                         GitDeliverySession(
-                            repository_root=profile.source_path,
+                            repository_root=profile.repository_path,
+                            project_root=profile.source_path,
+                            project_subpath=profile.project_subpath,
                             original_branch=record.git_original_branch or "",
                             base_commit=record.git_base_commit or "",
                             target_branch=record.git_branch or "",
@@ -1580,6 +1627,7 @@ class AssistantRuntime:
 
         payload = profile.model_dump(mode="python", exclude={"profile_hash"})
         payload["source_path"] = source_root
+        payload["repository_path"] = source_root
         return freeze_project_profile(ProjectProfile.model_validate(payload))
 
     def _resolve_acceptance_pack(

@@ -17,6 +17,7 @@ def _frozen_profile(tmp_path: Path):
             {
                 "project_id": "demo",
                 "source_path": tmp_path,
+                "repository_path": tmp_path,
                 "include_globs": [
                     "backend/app/**/*.py",
                     "backend/requirements.txt",

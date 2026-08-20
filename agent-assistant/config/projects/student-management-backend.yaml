@@ -1,5 +1,9 @@
 project_id: student-management-backend
 source_path: ../../../student-management
+repository_path: ../../..
+remote_name: origin
+base_branch: main
+branch_prefix: agent/run-
 include_globs:
   - backend/app/**/*.py
   - backend/requirements.txt

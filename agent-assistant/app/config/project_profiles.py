@@ -29,6 +29,35 @@ def _normalize_glob(value: str) -> str:
     return "/".join(parts)
 
 
+def _normalize_git_branch(value: str) -> str:
+    value = value.strip()
+    if (
+        not value
+        or len(value) > 255
+        or value == "HEAD"
+        or value.startswith(("-", "/", "."))
+        or value.endswith(("/", ".", ".lock"))
+        or "//" in value
+        or ".." in value
+        or "@{" in value
+        or "\\" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or any(character in " ~^:?*[" for character in value)
+    ):
+        raise ValueError("Git branch name is not safe")
+    return value
+
+
+def _normalize_branch_prefix(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("Git branch prefix must not be empty")
+    # Validate the complete shape with a harmless suffix.  Prefixes may end in
+    # '/' or '-' even though a complete branch may not end in '/'.
+    _normalize_git_branch(f"{value}probe")
+    return value
+
+
 class ProfileModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
@@ -77,6 +106,15 @@ class ProjectLimits(ProfileModel):
 class ProjectProfile(ProfileModel):
     project_id: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
     source_path: Path
+    repository_path: Path
+    remote_name: str = Field(
+        default="origin",
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    base_branch: str = "main"
+    branch_prefix: str = "agent/run-"
     include_globs: tuple[str, ...] = Field(min_length=1)
     exclude_globs: tuple[str, ...] = ()
     runner: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
@@ -93,11 +131,34 @@ class ProjectProfile(ProfileModel):
             raise ValueError("glob patterns must be unique under case-insensitive comparison")
         return normalized
 
+    @field_validator("base_branch")
+    @classmethod
+    def base_branch_is_safe(cls, value: str) -> str:
+        return _normalize_git_branch(value)
+
+    @field_validator("branch_prefix")
+    @classmethod
+    def branch_prefix_is_safe(cls, value: str) -> str:
+        return _normalize_branch_prefix(value)
+
     @model_validator(mode="after")
     def workspace_limits_are_consistent(self) -> ProjectProfile:
         if self.limits.max_file_bytes > self.limits.max_workspace_bytes:
             raise ValueError("max_file_mb cannot exceed max_workspace_mb")
+        repository = self.repository_path.resolve(strict=False)
+        source = self.source_path.resolve(strict=False)
+        try:
+            source.relative_to(repository)
+        except ValueError as exc:
+            raise ValueError("source_path must be inside repository_path") from exc
         return self
+
+    @property
+    def project_subpath(self) -> str:
+        relative = self.source_path.resolve(strict=False).relative_to(
+            self.repository_path.resolve(strict=False)
+        )
+        return "" if relative == Path(".") else relative.as_posix()
 
 
 class FrozenProjectProfile(ProjectProfile):
@@ -109,6 +170,7 @@ class FrozenProjectProfile(ProjectProfile):
 def _profile_hash_payload(profile: ProjectProfile) -> dict[str, Any]:
     payload = profile.model_dump(mode="json", exclude={"profile_hash"}, exclude_none=False)
     payload["source_path"] = profile.source_path.resolve(strict=False).as_posix()
+    payload["repository_path"] = profile.repository_path.resolve(strict=False).as_posix()
     return payload
 
 
@@ -130,6 +192,7 @@ def freeze_project_profile(profile: ProjectProfile) -> FrozenProjectProfile:
         return profile
     payload = profile.model_dump(mode="python")
     payload["source_path"] = profile.source_path.resolve(strict=False)
+    payload["repository_path"] = profile.repository_path.resolve(strict=False)
     payload["profile_hash"] = _canonical_profile_hash(profile)
     return FrozenProjectProfile.model_validate(payload)
 
@@ -142,15 +205,15 @@ def load_project_profile(path: str | Path) -> ProjectProfile:
         raise ValueError(f"cannot load project profile {profile_path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError("project profile root must be a YAML mapping")
-    source_path = raw.get("source_path")
-    if isinstance(source_path, str):
-        candidate = Path(source_path)
-        if not candidate.is_absolute():
-            candidate = profile_path.parent / candidate
-        raw["source_path"] = candidate.resolve(strict=False)
+    for field_name in ("source_path", "repository_path"):
+        configured_path = raw.get(field_name)
+        if isinstance(configured_path, str):
+            candidate = Path(configured_path)
+            if not candidate.is_absolute():
+                candidate = profile_path.parent / candidate
+            raw[field_name] = candidate.resolve(strict=False)
     return ProjectProfile.model_validate(raw)
 
 
 def load_frozen_project_profile(path: str | Path) -> FrozenProjectProfile:
     return freeze_project_profile(load_project_profile(path))
-

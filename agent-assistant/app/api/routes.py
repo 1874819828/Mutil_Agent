@@ -22,6 +22,7 @@ from app.api.schemas import (
 from app.api.security import bearer, require_local_control
 from app.background import BackgroundRunWorker
 from app.contracts import InvalidStatusTransition
+from app.git_delivery import GitDeliveryError
 from app.runtime import (
     AssistantRuntime,
     PublicationValidationError,
@@ -212,6 +213,8 @@ def publish_run(
             git_original_branch=payload.git_original_branch,
             git_base_commit=payload.git_base_commit,
             git_target_branch=payload.git_target_branch,
+            git_remote_name=payload.git_remote_name,
+            git_remote_url=payload.git_remote_url,
             idempotency_key=payload.idempotency_key,
             comment=payload.comment,
         )
@@ -220,6 +223,7 @@ def publish_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (
         IdempotencyConflictError,
+        GitDeliveryError,
         PublicationConflictError,
         PublicationValidationError,
         RuntimeConfigurationError,

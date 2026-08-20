@@ -8,11 +8,13 @@ resulting commit contains exactly the reviewed path set.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import subprocess
-from typing import Iterable
+from typing import Iterable, Mapping
+from urllib.parse import urlsplit
 
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
@@ -26,20 +28,30 @@ class GitDeliveryError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class GitRepositoryState:
     repository_root: Path
+    project_root: Path
+    project_subpath: str
     ready: bool
     clean: bool
     reason: str | None
     current_branch: str | None
     head_commit: str | None
     target_branch: str
+    remote_name: str | None
+    remote_url: str | None
+    base_branch: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class GitDeliverySession:
     repository_root: Path
+    project_root: Path
+    project_subpath: str
     original_branch: str
     base_commit: str
     target_branch: str
+    remote_name: str | None = None
+    remote_url: str | None = None
+    base_branch: str | None = None
 
 
 class GitDeliveryService:
@@ -52,78 +64,152 @@ class GitDeliveryService:
         self._timeout_seconds = timeout_seconds
 
     @staticmethod
-    def branch_for_run(run_id: str) -> str:
+    def branch_for_run(run_id: str, *, branch_prefix: str = "agent/run-") -> str:
         if not _SAFE_RUN_ID.fullmatch(run_id):
             raise GitDeliveryError("run id cannot be represented as a safe Git branch")
-        return f"agent/run-{run_id}"
+        target = f"{branch_prefix}{run_id}"
+        GitDeliveryService._validate_branch_name(target)
+        return target
 
-    def inspect(self, root: str | Path, *, run_id: str) -> GitRepositoryState:
-        repository = Path(root).resolve(strict=True)
-        target_branch = self.branch_for_run(run_id)
+    def inspect(
+        self,
+        project_root: str | Path,
+        *,
+        repository_root: str | Path | None = None,
+        run_id: str,
+        base_branch: str | None = None,
+        remote_name: str | None = None,
+        branch_prefix: str = "agent/run-",
+    ) -> GitRepositoryState:
+        project = Path(project_root).resolve(strict=True)
+        repository = Path(repository_root or project).resolve(strict=True)
+        target_branch = self.branch_for_run(run_id, branch_prefix=branch_prefix)
+        if base_branch is not None:
+            self._validate_branch_name(base_branch)
+        if remote_name is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", remote_name
+        ):
+            raise GitDeliveryError("configured Git remote name is not safe")
+        try:
+            relative_project = project.relative_to(repository)
+        except ValueError:
+            return self._state(
+                repository=repository,
+                project=project,
+                project_subpath="",
+                target_branch=target_branch,
+                base_branch=base_branch,
+                remote_name=remote_name,
+                reason="project source_path is outside the configured Git repository",
+            )
+        project_subpath = (
+            "" if relative_project == Path(".") else relative_project.as_posix()
+        )
         try:
             actual_root = Path(
                 self._run(repository, "rev-parse", "--show-toplevel").strip()
             ).resolve(strict=True)
         except GitDeliveryError:
-            return GitRepositoryState(
-                repository_root=repository,
-                ready=False,
-                clean=False,
-                reason="target project is not a Git repository",
-                current_branch=None,
-                head_commit=None,
+            return self._state(
+                repository=repository,
+                project=project,
+                project_subpath=project_subpath,
                 target_branch=target_branch,
+                base_branch=base_branch,
+                remote_name=remote_name,
+                reason="configured repository_path is not a Git repository",
             )
         if os.path.normcase(str(actual_root)) != os.path.normcase(str(repository)):
-            return GitRepositoryState(
-                repository_root=repository,
-                ready=False,
-                clean=False,
-                reason="project source_path must be the Git repository root",
-                current_branch=None,
-                head_commit=None,
+            return self._state(
+                repository=repository,
+                project=project,
+                project_subpath=project_subpath,
                 target_branch=target_branch,
+                base_branch=base_branch,
+                remote_name=remote_name,
+                reason="configured repository_path is not the Git repository root",
             )
         branch = self._run(repository, "branch", "--show-current").strip() or None
-        head = self._run(repository, "rev-parse", "--verify", "HEAD").strip()
+        try:
+            head = self._run(repository, "rev-parse", "--verify", "HEAD").strip()
+        except GitDeliveryError:
+            return self._state(
+                repository=repository,
+                project=project,
+                project_subpath=project_subpath,
+                target_branch=target_branch,
+                base_branch=base_branch,
+                remote_name=remote_name,
+                reason="Git repository does not have a base commit",
+                current_branch=branch,
+            )
         if not _COMMIT_ID.fullmatch(head):
             raise GitDeliveryError("Git HEAD is not a supported commit id")
         status = self._status_entries(repository)
         clean = not status
         branch_exists = self._ref_exists(repository, f"refs/heads/{target_branch}")
+        remote_url: str | None = None
         reason = None
         if branch is None:
             reason = "detached Git HEAD cannot be used for publication"
+        elif base_branch is not None and branch != base_branch:
+            reason = "configured Git base branch is not currently checked out"
         elif not clean:
             reason = "target Git repository contains uncommitted changes"
         elif branch_exists:
             reason = "target run branch already exists"
+        if remote_name is not None:
+            try:
+                remote_url = self._safe_remote_url(
+                    self._run(repository, "remote", "get-url", remote_name).strip()
+                )
+            except GitDeliveryError:
+                if reason is None:
+                    reason = "configured Git remote is unavailable or unsafe"
         return GitRepositoryState(
             repository_root=repository,
+            project_root=project,
+            project_subpath=project_subpath,
             ready=reason is None,
             clean=clean,
             reason=reason,
             current_branch=branch,
             head_commit=head,
             target_branch=target_branch,
+            remote_name=remote_name,
+            remote_url=remote_url,
+            base_branch=base_branch,
         )
 
     def start(
         self,
-        root: str | Path,
+        project_root: str | Path,
         *,
+        repository_root: str | Path | None = None,
         run_id: str,
+        base_branch: str | None = None,
+        remote_name: str | None = None,
+        branch_prefix: str = "agent/run-",
         expected_original_branch: str,
         expected_base_commit: str,
         expected_target_branch: str,
+        expected_remote_url: str | None = None,
     ) -> GitDeliverySession:
-        state = self.inspect(root, run_id=run_id)
+        state = self.inspect(
+            project_root,
+            repository_root=repository_root,
+            run_id=run_id,
+            base_branch=base_branch,
+            remote_name=remote_name,
+            branch_prefix=branch_prefix,
+        )
         if not state.ready:
             raise GitDeliveryError(state.reason or "Git repository is not ready")
         if (
             state.current_branch != expected_original_branch
             or state.head_commit != expected_base_commit
             or state.target_branch != expected_target_branch
+            or state.remote_url != expected_remote_url
         ):
             raise GitDeliveryError("Git publication binding changed after preview")
         self._check_branch(state.repository_root, expected_original_branch)
@@ -140,9 +226,14 @@ class GitDeliveryService:
             raise GitDeliveryError("Git did not enter the run delivery branch")
         return GitDeliverySession(
             repository_root=state.repository_root,
+            project_root=state.project_root,
+            project_subpath=state.project_subpath,
             original_branch=expected_original_branch,
             base_commit=expected_base_commit,
             target_branch=expected_target_branch,
+            remote_name=state.remote_name,
+            remote_url=state.remote_url,
+            base_branch=state.base_branch,
         )
 
     def commit(
@@ -150,13 +241,35 @@ class GitDeliveryService:
         session: GitDeliverySession,
         *,
         changed_files: Iterable[str],
+        expected_content_sha256: Mapping[str, str],
         message: str,
     ) -> str:
         repository = self._session_repository(session)
         self._assert_session_branch(session)
-        paths = self._normalized_paths(changed_files)
-        if not paths:
+        project_paths = self._normalized_paths(changed_files)
+        if not project_paths:
             raise GitDeliveryError("Git delivery requires at least one reviewed file")
+        paths = tuple(
+            self._repository_relative_path(session.project_subpath, path)
+            for path in project_paths
+        )
+        expected_hashes = {
+            self._normalized_path(path): digest
+            for path, digest in expected_content_sha256.items()
+        }
+        if set(expected_hashes) != set(project_paths) or any(
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            for digest in expected_hashes.values()
+        ):
+            raise GitDeliveryError(
+                "reviewed content hashes do not match the reviewed path set"
+            )
+        for project_path in project_paths:
+            content = self._project_file_bytes(session, project_path)
+            if hashlib.sha256(content).hexdigest() != expected_hashes[project_path]:
+                raise GitDeliveryError(
+                    "project content changed before Git staging"
+                )
         actual = self._status_entries(repository)
         actual_paths = {path for _, path in actual}
         expected_paths = set(paths)
@@ -173,6 +286,12 @@ class GitDeliveryService:
                 raise GitDeliveryError("Git deletion or rename delivery is not supported")
 
         self._run(repository, "add", "--", *paths)
+        for project_path, repository_path in zip(project_paths, paths, strict=True):
+            staged_blob = self._run_bytes(repository, "show", f":{repository_path}")
+            if hashlib.sha256(staged_blob).hexdigest() != expected_hashes[project_path]:
+                raise GitDeliveryError(
+                    "Git staging transformed reviewed file content"
+                )
         staged = self._nul_paths(
             self._run_bytes(
                 repository,
@@ -206,6 +325,27 @@ class GitDeliveryService:
         parent = self._run(repository, "rev-parse", "HEAD^").strip()
         if parent != session.base_commit:
             raise GitDeliveryError("Git delivery commit is not based on the bound commit")
+        committed = self._nul_paths(
+            self._run_bytes(
+                repository,
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "-z",
+                "HEAD",
+            )
+        )
+        if set(committed) != expected_paths:
+            raise GitDeliveryError("Git commit paths do not match the reviewed change set")
+        for project_path, repository_path in zip(project_paths, paths, strict=True):
+            committed_blob = self._run_bytes(
+                repository, "show", f"HEAD:{repository_path}"
+            )
+            if hashlib.sha256(committed_blob).hexdigest() != expected_hashes[project_path]:
+                raise GitDeliveryError(
+                    "Git commit content does not match the reviewed content"
+                )
         if self._status_entries(repository):
             raise GitDeliveryError("Git repository is not clean after commit")
         return commit
@@ -239,6 +379,14 @@ class GitDeliveryService:
 
     def _session_repository(self, session: GitDeliverySession) -> Path:
         repository = session.repository_root.resolve(strict=True)
+        project = session.project_root.resolve(strict=True)
+        try:
+            relative = project.relative_to(repository)
+        except ValueError as exc:
+            raise GitDeliveryError("Git session project moved outside its repository") from exc
+        expected_subpath = "" if relative == Path(".") else relative.as_posix()
+        if expected_subpath != session.project_subpath:
+            raise GitDeliveryError("Git session project subpath changed")
         actual = Path(
             self._run(repository, "rev-parse", "--show-toplevel").strip()
         ).resolve(strict=True)
@@ -247,6 +395,8 @@ class GitDeliveryService:
         return repository
 
     def _assert_session_branch(self, session: GitDeliverySession) -> None:
+        if session.base_branch is not None and session.original_branch != session.base_branch:
+            raise GitDeliveryError("Git session base branch binding changed")
         current = self._run(
             session.repository_root, "branch", "--show-current"
         ).strip()
@@ -257,6 +407,17 @@ class GitDeliveryService:
         ).strip()
         if merge_base != session.base_commit:
             raise GitDeliveryError("Git run branch no longer contains the bound base")
+        if session.remote_name is not None:
+            remote_url = self._safe_remote_url(
+                self._run(
+                    session.repository_root,
+                    "remote",
+                    "get-url",
+                    session.remote_name,
+                ).strip()
+            )
+            if remote_url != session.remote_url:
+                raise GitDeliveryError("Git remote binding changed during publication")
 
     def _status_entries(self, repository: Path) -> tuple[tuple[str, str], ...]:
         raw = self._run_bytes(
@@ -303,6 +464,28 @@ class GitDeliveryService:
         return result
 
     @staticmethod
+    def _repository_relative_path(project_subpath: str, project_path: str) -> str:
+        prefix = GitDeliveryService._normalized_path(project_subpath) if project_subpath else ""
+        normalized = GitDeliveryService._normalized_path(project_path)
+        return f"{prefix}/{normalized}" if prefix else normalized
+
+    @staticmethod
+    def _project_file_bytes(session: GitDeliverySession, project_path: str) -> bytes:
+        relative = Path(*PurePosixPath(project_path).parts)
+        unresolved = session.project_root / relative
+        if unresolved.is_symlink():
+            raise GitDeliveryError("reviewed Git paths cannot be symbolic links")
+        target = unresolved.resolve(strict=True)
+        project = session.project_root.resolve(strict=True)
+        try:
+            target.relative_to(project)
+        except ValueError as exc:
+            raise GitDeliveryError("reviewed Git path escaped the project root") from exc
+        if not target.is_file():
+            raise GitDeliveryError("reviewed Git path is not a regular file")
+        return target.read_bytes()
+
+    @staticmethod
     def _normalized_path(value: str) -> str:
         if "\x00" in value or "\\" in value:
             raise GitDeliveryError("Git path must be a portable relative path")
@@ -320,6 +503,65 @@ class GitDeliveryService:
 
     def _check_branch(self, repository: Path, branch: str) -> None:
         self._run(repository, "check-ref-format", "--branch", branch)
+
+    @staticmethod
+    def _validate_branch_name(value: str) -> None:
+        if (
+            not value
+            or len(value) > 255
+            or value == "HEAD"
+            or value.startswith(("-", "/", "."))
+            or value.endswith(("/", ".", ".lock"))
+            or "//" in value
+            or ".." in value
+            or "@{" in value
+            or "\\" in value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            or any(character in " ~^:?*[" for character in value)
+        ):
+            raise GitDeliveryError("configured Git branch name is not safe")
+
+    @staticmethod
+    def _safe_remote_url(value: str) -> str:
+        if (
+            not value
+            or len(value) > 2048
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise GitDeliveryError("configured Git remote URL is not safe")
+        parsed = urlsplit(value)
+        if parsed.scheme in {"http", "https"} and (
+            parsed.username is not None or parsed.password is not None
+        ):
+            raise GitDeliveryError("credentialed Git remote URLs are not supported")
+        return value
+
+    @staticmethod
+    def _state(
+        *,
+        repository: Path,
+        project: Path,
+        project_subpath: str,
+        target_branch: str,
+        base_branch: str | None,
+        remote_name: str | None,
+        reason: str,
+        current_branch: str | None = None,
+    ) -> GitRepositoryState:
+        return GitRepositoryState(
+            repository_root=repository,
+            project_root=project,
+            project_subpath=project_subpath,
+            ready=False,
+            clean=False,
+            reason=reason,
+            current_branch=current_branch,
+            head_commit=None,
+            target_branch=target_branch,
+            remote_name=remote_name,
+            remote_url=None,
+            base_branch=base_branch,
+        )
 
     def _ref_exists(self, repository: Path, ref: str) -> bool:
         completed = self._execute(
@@ -346,6 +588,8 @@ class GitDeliveryService:
                     self._git_binary,
                     "-c",
                     f"safe.directory={repository.as_posix()}",
+                    "-c",
+                    f"core.hooksPath={os.devnull}",
                     "-C",
                     str(repository),
                     *args,

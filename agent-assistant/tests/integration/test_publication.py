@@ -15,6 +15,9 @@ from app.runtime import AssistantRuntime
 from app.sandbox import ExecutionResult, ScriptedRunner
 
 
+REMOTE_URL = "https://example.invalid/owner/monorepo.git"
+
+
 def _result(*, ok: bool = True) -> ExecutionResult:
     return ExecutionResult(
         exit_code=0 if ok else 1,
@@ -42,15 +45,22 @@ def _publish_binding(preview) -> dict[str, str]:
     assert preview.git_current_branch
     assert preview.git_base_commit
     assert preview.git_target_branch
+    assert preview.git_remote_name
+    assert preview.git_remote_url
     return {
         "git_original_branch": preview.git_current_branch,
         "git_base_commit": preview.git_base_commit,
         "git_target_branch": preview.git_target_branch,
+        "git_remote_name": preview.git_remote_name,
+        "git_remote_url": preview.git_remote_url,
     }
 
 
-def _runtime(tmp_path: Path, *, post_publish_ok: bool = True) -> tuple[AssistantRuntime, Path]:
-    source = tmp_path / "project"
+def _runtime(
+    tmp_path: Path, *, post_publish_ok: bool = True
+) -> tuple[AssistantRuntime, Path, Path]:
+    repository = tmp_path / "repository"
+    source = repository / "student-management"
     (source / "backend" / "app").mkdir(parents=True)
     (source / "backend" / "app" / "main.py").write_text(
         "from fastapi import FastAPI\n"
@@ -67,17 +77,28 @@ def _runtime(tmp_path: Path, *, post_publish_ok: bool = True) -> tuple[Assistant
     # Real repositories contain many files outside the controlled profile;
     # publication must ignore them without allowing them to be written.
     (source / "README.md").write_text("outside managed scope\n", encoding="utf-8")
-    _git(source, "init", "-b", "main")
-    _git(source, "config", "user.name", "Fixture")
-    _git(source, "config", "user.email", "fixture@example.invalid")
-    _git(source, "add", "--", ".")
-    _git(source, "commit", "-m", "initial")
+    (repository / "README.md").write_text("monorepo root\n", encoding="utf-8")
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.name", "Fixture")
+    _git(repository, "config", "user.email", "fixture@example.invalid")
+    _git(repository, "remote", "add", "origin", REMOTE_URL)
+    _git(
+        repository,
+        "add",
+        "--",
+        "README.md",
+        "student-management/README.md",
+        "student-management/backend/app/main.py",
+        "student-management/backend/app/database.py",
+    )
+    _git(repository, "commit", "-m", "initial")
     profile = tmp_path / "profile.yaml"
     profile.write_text(
         yaml.safe_dump(
             {
                 "project_id": "publish-demo",
                 "source_path": str(source),
+                "repository_path": str(repository),
                 "include_globs": ["backend/app/**/*.py"],
                 "exclude_globs": ["**/__pycache__/**"],
                 "runner": "python-fastapi",
@@ -114,6 +135,7 @@ def _runtime(tmp_path: Path, *, post_publish_ok: bool = True) -> tuple[Assistant
             worker_id="publication-test-worker",
         ),
         source,
+        repository,
     )
 
 
@@ -141,7 +163,7 @@ def _completed(runtime: AssistantRuntime):
 def test_completed_run_requires_hash_bound_second_confirmation_before_publish(
     tmp_path: Path,
 ) -> None:
-    runtime, source = _runtime(tmp_path)
+    runtime, source, repository = _runtime(tmp_path)
     completed = _completed(runtime)
     before = (source / "backend" / "app" / "main.py").read_bytes()
 
@@ -151,6 +173,11 @@ def test_completed_run_requires_hash_bound_second_confirmation_before_publish(
     assert preview.status == "not_published"
     assert preview.changed_files == ("backend/app/main.py",)
     assert preview.diff_sha256
+    assert Path(preview.git_repository_root) == repository.resolve()
+    assert preview.git_project_subpath == "student-management"
+    assert preview.git_remote_name == "origin"
+    assert preview.git_remote_url == REMOTE_URL
+    assert preview.git_base_branch == "main"
     assert (source / "backend" / "app" / "main.py").read_bytes() == before
 
     with pytest.raises(RuntimeError, match="diff"):
@@ -162,6 +189,20 @@ def test_completed_run_requires_hash_bound_second_confirmation_before_publish(
             diff_sha256="0" * 64,
             **_publish_binding(preview),
             idempotency_key="publication-confirm-001",
+        )
+    assert (source / "backend" / "app" / "main.py").read_bytes() == before
+
+    changed_remote = _publish_binding(preview)
+    changed_remote["git_remote_url"] = "https://example.invalid/other/repository.git"
+    with pytest.raises(RuntimeError, match="remote URL"):
+        runtime.publish_run(
+            completed.run_id,
+            confirmation="publish",
+            project_profile_hash=preview.project_profile_hash,
+            source_manifest_hash=preview.source_manifest_hash,
+            diff_sha256=preview.diff_sha256,
+            **changed_remote,
+            idempotency_key="publication-confirm-remote-drift",
         )
     assert (source / "backend" / "app" / "main.py").read_bytes() == before
 
@@ -178,10 +219,10 @@ def test_completed_run_requires_hash_bound_second_confirmation_before_publish(
     assert published.status == "published"
     assert published.git_original_branch == "main"
     assert published.git_branch == preview.git_target_branch
-    assert published.git_commit == _git(source, "rev-parse", "HEAD")
-    assert _git(source, "branch", "--show-current") == preview.git_target_branch
-    assert _git(source, "show", "--pretty=format:", "--name-only", "HEAD") == (
-        "backend/app/main.py"
+    assert published.git_commit == _git(repository, "rev-parse", "HEAD")
+    assert _git(repository, "branch", "--show-current") == preview.git_target_branch
+    assert _git(repository, "show", "--pretty=format:", "--name-only", "HEAD") == (
+        "student-management/backend/app/main.py"
     )
     assert '@app.get("/api/v1/health")' in (
         source / "backend" / "app" / "main.py"
@@ -198,7 +239,7 @@ def test_completed_run_requires_hash_bound_second_confirmation_before_publish(
 
 
 def test_publication_rejects_source_drift_without_writing(tmp_path: Path) -> None:
-    runtime, source = _runtime(tmp_path)
+    runtime, source, _ = _runtime(tmp_path)
     completed = _completed(runtime)
     main = source / "backend" / "app" / "main.py"
     before = main.read_bytes()
@@ -220,6 +261,8 @@ def test_publication_rejects_source_drift_without_writing(tmp_path: Path) -> Non
             git_original_branch=preview.git_current_branch or "main",
             git_base_commit=preview.git_base_commit or "0" * 40,
             git_target_branch=preview.git_target_branch or "agent/run-missing",
+            git_remote_name=preview.git_remote_name or "origin",
+            git_remote_url=preview.git_remote_url or REMOTE_URL,
             idempotency_key="publication-drift-001",
         )
     assert main.read_bytes() == before
@@ -228,20 +271,20 @@ def test_publication_rejects_source_drift_without_writing(tmp_path: Path) -> Non
 def test_publication_rejects_git_dirty_path_outside_managed_profile(
     tmp_path: Path,
 ) -> None:
-    runtime, source = _runtime(tmp_path)
+    runtime, _, repository = _runtime(tmp_path)
     completed = _completed(runtime)
-    (source / "README.md").write_text("operator edit\n", encoding="utf-8")
+    (repository / "README.md").write_text("operator edit\n", encoding="utf-8")
 
     preview = runtime.publication_preview(completed.run_id)
 
     assert preview.eligible is False
     assert preview.git_ready is False
     assert "uncommitted" in (preview.reason or "").lower()
-    assert _git(source, "branch", "--show-current") == "main"
+    assert _git(repository, "branch", "--show-current") == "main"
 
 
 def test_failed_post_publish_verification_rolls_back_all_files(tmp_path: Path) -> None:
-    runtime, source = _runtime(tmp_path, post_publish_ok=False)
+    runtime, source, repository = _runtime(tmp_path, post_publish_ok=False)
     completed = _completed(runtime)
     preview = runtime.publication_preview(completed.run_id)
     before = {
@@ -267,14 +310,14 @@ def test_failed_post_publish_verification_rolls_back_all_files(tmp_path: Path) -
     assert after == before
     record = runtime.store.get_publication(completed.run_id)
     assert record is not None and record.status == "failed"
-    assert _git(source, "branch", "--show-current") == "main"
-    assert _git(source, "branch", "--list", preview.git_target_branch or "") == ""
+    assert _git(repository, "branch", "--show-current") == "main"
+    assert _git(repository, "branch", "--list", preview.git_target_branch or "") == ""
 
 
 def test_publication_api_exposes_preview_and_requires_bound_confirmation(
     tmp_path: Path,
 ) -> None:
-    runtime, source = _runtime(tmp_path)
+    runtime, source, repository = _runtime(tmp_path)
     completed = _completed(runtime)
     token = "publication-api-control-token-32-chars"
     headers = {"Authorization": f"Bearer {token}"}
@@ -289,6 +332,11 @@ def test_publication_api_exposes_preview_and_requires_bound_confirmation(
         assert preview_response.status_code == 200
         preview = preview_response.json()
         assert preview["eligible"] is True
+        assert Path(preview["git_repository_root"]) == repository.resolve()
+        assert preview["git_project_subpath"] == "student-management"
+        assert preview["git_remote_name"] == "origin"
+        assert preview["git_remote_url"] == REMOTE_URL
+        assert preview["git_base_branch"] == "main"
 
         rejected = client.post(
             f"/api/v1/runs/{completed.run_id}/publication",
@@ -301,6 +349,8 @@ def test_publication_api_exposes_preview_and_requires_bound_confirmation(
                 "git_original_branch": preview["git_current_branch"],
                 "git_base_commit": preview["git_base_commit"],
                 "git_target_branch": preview["git_target_branch"],
+                "git_remote_name": preview["git_remote_name"],
+                "git_remote_url": preview["git_remote_url"],
                 "idempotency_key": "publication-api-reject-001",
             },
         )
@@ -317,6 +367,8 @@ def test_publication_api_exposes_preview_and_requires_bound_confirmation(
                 "git_original_branch": preview["git_current_branch"],
                 "git_base_commit": preview["git_base_commit"],
                 "git_target_branch": preview["git_target_branch"],
+                "git_remote_name": preview["git_remote_name"],
+                "git_remote_url": preview["git_remote_url"],
                 "idempotency_key": "publication-api-confirm-001",
                 "comment": "reviewed in local console",
             },
@@ -325,7 +377,7 @@ def test_publication_api_exposes_preview_and_requires_bound_confirmation(
     assert published.status_code == 200
     assert published.json()["status"] == "published"
     assert published.json()["git_branch"] == preview["git_target_branch"]
-    assert published.json()["git_commit"] == _git(source, "rev-parse", "HEAD")
+    assert published.json()["git_commit"] == _git(repository, "rev-parse", "HEAD")
     assert "/api/v1/health" in (
         source / "backend" / "app" / "main.py"
     ).read_text(encoding="utf-8")
@@ -334,7 +386,7 @@ def test_publication_api_exposes_preview_and_requires_bound_confirmation(
 def test_completed_git_publication_is_not_undone_when_timeline_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime, source = _runtime(tmp_path)
+    runtime, _, repository = _runtime(tmp_path)
     completed = _completed(runtime)
     preview = runtime.publication_preview(completed.run_id)
     original_append = runtime.store.append_event
@@ -356,14 +408,14 @@ def test_completed_git_publication_is_not_undone_when_timeline_write_fails(
     )
 
     assert published.status == "published"
-    assert published.git_commit == _git(source, "rev-parse", "HEAD")
-    assert _git(source, "branch", "--show-current") == preview.git_target_branch
+    assert published.git_commit == _git(repository, "rev-parse", "HEAD")
+    assert _git(repository, "branch", "--show-current") == preview.git_target_branch
 
 
 def test_interrupted_publication_is_rolled_back_on_runtime_restart(
     tmp_path: Path,
 ) -> None:
-    runtime, source = _runtime(tmp_path)
+    runtime, source, repository = _runtime(tmp_path)
     completed = _completed(runtime)
     preview = runtime.publication_preview(completed.run_id)
     profile = runtime._verified_profile(completed)
@@ -401,10 +453,15 @@ def test_interrupted_publication_is_rolled_back_on_runtime_restart(
     )
     runtime._git_delivery.start(
         source,
+        repository_root=repository,
         run_id=completed.run_id,
+        base_branch=profile.base_branch,
+        remote_name=profile.remote_name,
+        branch_prefix=profile.branch_prefix,
         expected_original_branch=preview.git_current_branch or "main",
         expected_base_commit=preview.git_base_commit or "0" * 40,
         expected_target_branch=preview.git_target_branch or "agent/run-missing",
+        expected_remote_url=preview.git_remote_url,
     )
     target = source / "backend" / "app" / "main.py"
     target.write_bytes(desired["backend/app/main.py"])
@@ -421,6 +478,6 @@ def test_interrupted_publication_is_rolled_back_on_runtime_restart(
     record = restarted.store.get_publication(completed.run_id)
     assert record is not None and record.status == "failed"
     assert "rolled back" in (record.error or "")
-    assert _git(source, "branch", "--show-current") == "main"
-    assert _git(source, "branch", "--list", preview.git_target_branch or "") == ""
+    assert _git(repository, "branch", "--show-current") == "main"
+    assert _git(repository, "branch", "--list", preview.git_target_branch or "") == ""
     assert diff

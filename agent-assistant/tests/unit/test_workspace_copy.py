@@ -29,6 +29,7 @@ def _profile(source: Path, **limit_overrides: object):
             {
                 "project_id": "demo",
                 "source_path": source,
+                "repository_path": source,
                 "include_globs": ["backend/**/*.py", "backend/requirements.txt"],
                 "exclude_globs": ["**/__pycache__/**"],
                 "runner": "python-fastapi",

@@ -497,6 +497,9 @@ function renderPublication(publication) {
   if (publication.status === "published") {
     return `<p class="review-approve">✓ 已发布到独立 Git 分支并重新通过 Baseline + Acceptance 验证</p>
       <div class="hash-box">目标: ${esc(publication.source_path)}<br>
+      仓库根: ${esc(publication.git_repository_root || "—")}<br>
+      项目子路径: ${esc(publication.git_project_subpath || "(仓库根)")}<br>
+      Git 远程: ${esc(publication.git_remote_name || "—")} · ${esc(publication.git_remote_url || "—")}<br>
       Git 分支: ${esc(publication.git_target_branch || "旧版直接发布")}<br>
       Git commit: ${esc(publication.git_commit || "—")}<br>
       Git base: ${esc(publication.git_base_commit || "—")}<br>
@@ -506,12 +509,15 @@ function renderPublication(publication) {
   return `
     <p><b>当前 completed 仅表示隔离工作副本通过评审，不代表已写入真实项目。</b></p>
     <p class="muted" style="margin-top:6px">目标路径: <span class="mono">${esc(publication.source_path)}</span></p>
+    <p class="muted" style="margin-top:6px">Git 仓库根: <span class="mono">${esc(publication.git_repository_root || "—")}</span>；项目子路径: <span class="mono">${esc(publication.git_project_subpath || "(仓库根)")}</span></p>
     ${files ? `<ul class="publish-files">${files}</ul>` : ""}
     <div class="hash-box">
       project_profile_hash: ${esc(publication.project_profile_hash)}<br>
       source_manifest_hash: ${esc(publication.source_manifest_hash)}<br>
       current_source_manifest_hash: ${esc(publication.current_source_manifest_hash || "—")}<br>
       diff_sha256: ${esc(publication.diff_sha256 || "—")}<br>
+      Git 远程: ${esc(publication.git_remote_name || "—")} · ${esc(publication.git_remote_url || "—")}<br>
+      Git 配置基线: ${esc(publication.git_base_branch || "—")}<br>
       Git 当前分支: ${esc(publication.git_current_branch || "—")}<br>
       Git 基线 commit: ${esc(publication.git_base_commit || "—")}<br>
       Git 发布分支: ${esc(publication.git_target_branch || "—")}
@@ -701,7 +707,7 @@ async function cancelRun(runId) {
 }
 
 async function submitPublication(run, publication) {
-  if (!confirm(`最后确认：将在 ${publication.git_target_branch} 分支发布 ${publication.changed_files.length} 个文件\n${publication.source_path}\n\n测试通过后自动 commit，失败会恢复原分支。是否继续？`)) return;
+  if (!confirm(`最后确认：将在 ${publication.git_remote_name} (${publication.git_remote_url}) 对应仓库的 ${publication.git_target_branch} 分支发布 ${publication.changed_files.length} 个文件\n仓库根：${publication.git_repository_root}\n项目：${publication.git_project_subpath || "(仓库根)"}\n\n本步骤只创建本地 commit，不会自动推送远程；测试失败会恢复原分支。是否继续？`)) return;
   const btn = $("publishBtn");
   btn.disabled = true;
   btn.textContent = "发布并复验中…";
@@ -716,6 +722,8 @@ async function submitPublication(run, publication) {
         git_original_branch: publication.git_current_branch,
         git_base_commit: publication.git_base_commit,
         git_target_branch: publication.git_target_branch,
+        git_remote_name: publication.git_remote_name,
+        git_remote_url: publication.git_remote_url,
         idempotency_key: `console-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         comment: "控制台二次确认发布",
       }),

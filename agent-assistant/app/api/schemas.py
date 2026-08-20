@@ -78,7 +78,20 @@ class PublishRunRequest(BaseModel):
         max_length=255,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$",
     )
+    git_remote_name: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    git_remote_url: str = Field(min_length=1, max_length=2048)
     idempotency_key: str = Field(
         min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"
     )
     comment: str | None = Field(default=None, max_length=2_000)
+
+    @field_validator("git_remote_url")
+    @classmethod
+    def remote_url_has_no_control_characters(cls, value: str) -> str:
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("Git remote URL contains control characters")
+        return value
