@@ -1,0 +1,66 @@
+"""Public structured contracts for the assistant workflow."""
+
+from .enums import (
+    ApprovalOutcome,
+    CoverageStatus,
+    FileOperation,
+    FindingSeverity,
+    ReviewOutcome,
+    RiskLevel,
+    RunStatus,
+    TERMINAL_STATUSES,
+)
+from .hashing import canonical_json_bytes, canonical_json_hash
+from .models import (
+    ChangeSet,
+    FileChange,
+    ProposedChangeSet,
+    ProposedFileChange,
+    InspectionFileRequest,
+    InspectionRequest,
+    RequirementCoverage,
+    ReviewDecision,
+    ReviewFinding,
+    RunSummary,
+    TaskPlan,
+    TaskStep,
+    TestFailure,
+    TestResult,
+)
+from .transitions import (
+    ALLOWED_STATUS_TRANSITIONS,
+    InvalidStatusTransition,
+    can_transition,
+    validate_transition,
+)
+
+__all__ = [
+    "ALLOWED_STATUS_TRANSITIONS",
+    "ApprovalOutcome",
+    "ChangeSet",
+    "CoverageStatus",
+    "FileChange",
+    "ProposedChangeSet",
+    "ProposedFileChange",
+    "FileOperation",
+    "FindingSeverity",
+    "InvalidStatusTransition",
+    "InspectionFileRequest",
+    "InspectionRequest",
+    "RequirementCoverage",
+    "ReviewDecision",
+    "ReviewFinding",
+    "ReviewOutcome",
+    "RiskLevel",
+    "RunStatus",
+    "RunSummary",
+    "TERMINAL_STATUSES",
+    "TaskPlan",
+    "TaskStep",
+    "TestFailure",
+    "TestResult",
+    "can_transition",
+    "canonical_json_bytes",
+    "canonical_json_hash",
+    "validate_transition",
+]
