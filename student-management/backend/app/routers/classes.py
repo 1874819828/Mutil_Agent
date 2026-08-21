@@ -1,5 +1,5 @@
 """班级管理接口"""
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -12,13 +12,20 @@ router = APIRouter(prefix="/api/classes", tags=["班级管理"])
 
 
 @router.get("", response_model=list[ClassResponse])
-async def list_classes(db: AsyncSession = Depends(get_db), _=Depends(get_current_user)):
-    result = await db.execute(
+async def list_classes(
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_current_user),
+    grade: int | None = Query(default=None, ge=2000, le=2100),
+):
+    query = (
         select(Class, func.count(Student.id).label("cnt"))
         .outerjoin(Student, Class.id == Student.class_id)
         .group_by(Class.id)
         .order_by(Class.grade.desc(), Class.name)
     )
+    if grade is not None:
+        query = query.where(Class.grade == grade)
+    result = await db.execute(query)
     return [
         ClassResponse(id=c.id, name=c.name, grade=c.grade, head_teacher=c.head_teacher, student_count=cnt, created_at=c.created_at)
         for c, cnt in result.all()
